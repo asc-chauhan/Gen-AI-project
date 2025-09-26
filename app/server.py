@@ -31,7 +31,7 @@ async def upload_file(
     file_path = f"/mnt/uploads/{str(db_file.inserted_id)}/{file.filename}"
     await save_to_disk(file=await file.read(), path=file_path)
     
-    queue.enqueue(process_file, str(db_file.inserted_id))
+    queue.enqueue(process_file, str(db_file.inserted_id), file_path)
     
     await files_collection.update_one({"_id": str(db_file.inserted_id)}, {
         "$set": {"status": "queued"}
