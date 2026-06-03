@@ -1,7 +1,52 @@
-source /workspaces/Gen-AI-project/env/bin/activate
+# ============================================
+# SETUP (Run once)
+# ============================================
+# NOTE: You're in a Docker container, so venv is OPTIONAL
+# The container already provides isolation
+
+# Option 1: Without venv (Recommended for Docker)
 pip install -r requirements.txt
+
+# Option 2: With venv (if you prefer)
+# python3 -m venv env
+# source env/bin/activate
+# pip install -r requirements.txt
+
+# ============================================
+# START SERVICES (Run in separate terminals)
+# ============================================
+
+# Terminal 1: Start FastAPI server
+# (If using venv: source env/bin/activate)
 uvicorn app.server:app --host 0.0.0.0 --port 8000 --reload
-curl localhost:8000
-sh run.sh
-sh freeze.sh
+
+# Terminal 2: Start RQ worker
+# (If using venv: source env/bin/activate)
 rq worker --with-scheduler --url redis://valkey
+
+# ============================================
+# ACCESS API DOCUMENTATION
+# ============================================
+# Swagger UI (Interactive API docs with file upload)
+# Open in browser: http://localhost:8000/docs
+
+# ReDoc (Alternative API documentation)
+# Open in browser: http://localhost:8000/redoc
+
+# ============================================
+# TESTING (via curl)
+# ============================================
+# Test health endpoint
+curl http://localhost:8000
+
+# Test upload endpoint
+curl -X POST "http://localhost:8000/upload" -F "file=@/path/to/your/file.pdf"
+
+# Get file status/result
+curl http://localhost:8000/{file_id}
+
+# ============================================
+# UTILITY COMMANDS
+# ============================================
+# Freeze requirements (update requirements.txt)
+sh freeze.sh

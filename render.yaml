@@ -1,0 +1,39 @@
+services:
+  # Web Service (FastAPI)
+  - type: web
+    name: resumeai-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: MONGODB_URI
+        sync: false  # Set manually in Render dashboard
+      - key: REDIS_URL
+        fromService:
+          name: resumeai-redis
+          type: redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false  # Set manually in Render dashboard
+
+  # Background Worker (RQ)
+  - type: worker
+    name: resumeai-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: rq worker --url $REDIS_URL
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          name: resumeai-redis
+          type: redis
+          property: connectionString
+      - key: GEMINI_API_KEY
+        sync: false
+
+  # Redis (for job queue)
+  - type: redis
+    name: resumeai-redis
+    plan: free
+    maxmemoryPolicy: noeviction

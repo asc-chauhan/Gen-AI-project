@@ -1,9 +1,7 @@
+import os
 from redis import Redis
 from rq import Queue
 
-# redis_connection = Redis(
-#     host = "valkey",
-#     port = "6379"
-# )
+REDIS_URL = os.environ.get("REDIS_URL", "redis://valkey:6379")
 
-queue = Queue(connection=Redis(host="valkey"))
+queue = Queue(connection=Redis.from_url(REDIS_URL))
