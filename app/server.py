@@ -1,16 +1,22 @@
 # from uuid import uuid4
 import importlib
-from fastapi import FastAPI, UploadFile, Path, Form, File
+import asyncio
+from fastapi import FastAPI, UploadFile, Path, Form, File, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from .utils.file import save_to_disk
 from .db.collections.files import files_collection, FileSchema, setup_ttl_index
-from .queue.q import queue
 from .queue.workers import process_file
 from bson import ObjectId
 from datetime import datetime
 from typing import Optional
 import os
+
+# Use RQ queue only if REDIS_URL is set and reachable
+USE_QUEUE = os.environ.get("USE_QUEUE", "false").lower() == "true"
+
+if USE_QUEUE:
+    from .queue.q import queue
 
 app = FastAPI()
 
@@ -31,7 +37,6 @@ def home():
 @app.get("/{id}")
 async def get_file_by_id(id: str = Path(..., description="ID of the file")):
     db_file = await files_collection.find_one({"_id": ObjectId(id)})
-    # print(db_file)
     return {
         "_id": str(db_file["_id"]),
         "name": db_file["name"],
@@ -41,8 +46,19 @@ async def get_file_by_id(id: str = Path(..., description="ID of the file")):
     }
 
 
+def run_process_file(file_id: str, file_path: str, jd_content: str):
+    """Run the async process_file in a new event loop (for BackgroundTasks)."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(process_file(file_id, file_path, jd_content))
+    finally:
+        loop.close()
+
+
 @app.post("/upload")
 async def upload_file(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     jd_text: Optional[str] = Form(None),
     jd_file: Optional[UploadFile] = File(None),
@@ -71,31 +87,16 @@ async def upload_file(
         except Exception:
             pass
     
-    queue.enqueue(process_file, str(db_file.inserted_id), file_path, jd_content)
+    if USE_QUEUE:
+        # Production: use Redis Queue with separate worker
+        queue.enqueue(process_file, str(db_file.inserted_id), file_path, jd_content)
+    else:
+        # Free tier: use FastAPI BackgroundTasks (in-process)
+        background_tasks.add_task(run_process_file, str(db_file.inserted_id), file_path, jd_content)
     
-    await files_collection.update_one({"_id": str(db_file.inserted_id)}, {
+    await files_collection.update_one({"_id": db_file.inserted_id}, {
         "$set": {"status": "queued"}
         }
     )
     
     return {"file_id": str(db_file.inserted_id)}
-
-# @app.post("/chat")
-# def chat(query: str = Query(..., description="Chat message...")):
-#     # Take the query & push the query to queue
-#     # Internally calls as process_query(query)
-#     job = queue.enqueue(process_query, query)
-
-#     # Give a response to user about job received
-#     return {"status": "Queued", "job_id": job.id}
-
-
-# @app.get("/result/{job_id}")
-# def get_result(
-#     job_id: str = Path(..., description="Job ID...")
-# ):
-#     job = queue.fetch_job(job_id=job_id)
-
-#     result = job.return_value()
-
-#     return {"result": result}
