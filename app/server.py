@@ -1,7 +1,6 @@
 # from uuid import uuid4
-import importlib
 import asyncio
-from fastapi import FastAPI, UploadFile, Path, Form, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, Path, Form, File
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from .utils.file import save_to_disk
@@ -12,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 import os
 
-# Use RQ queue only if REDIS_URL is set and reachable
+# Use RQ queue only if USE_QUEUE=true
 USE_QUEUE = os.environ.get("USE_QUEUE", "false").lower() == "true"
 
 if USE_QUEUE:
@@ -46,19 +45,8 @@ async def get_file_by_id(id: str = Path(..., description="ID of the file")):
     }
 
 
-def run_process_file(file_id: str, file_path: str, jd_content: str):
-    """Run the async process_file in a new event loop (for BackgroundTasks)."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(process_file(file_id, file_path, jd_content))
-    finally:
-        loop.close()
-
-
 @app.post("/upload")
 async def upload_file(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     jd_text: Optional[str] = Form(None),
     jd_file: Optional[UploadFile] = File(None),
@@ -91,8 +79,8 @@ async def upload_file(
         # Production: use Redis Queue with separate worker
         queue.enqueue(process_file, str(db_file.inserted_id), file_path, jd_content)
     else:
-        # Free tier: use FastAPI BackgroundTasks (in-process)
-        background_tasks.add_task(run_process_file, str(db_file.inserted_id), file_path, jd_content)
+        # Free tier: fire-and-forget async task on the event loop
+        asyncio.create_task(process_file(str(db_file.inserted_id), file_path, jd_content))
     
     await files_collection.update_one({"_id": db_file.inserted_id}, {
         "$set": {"status": "queued"}
