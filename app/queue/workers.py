@@ -1,20 +1,84 @@
-from ..db.collections.files import files_collection
 from pdf2image import convert_from_path
 from bson import ObjectId
 import os
 import re
 import base64
 import shutil
+import time
+import certifi
 from openai import OpenAI
 from datetime import datetime
 from PyPDF2 import PdfReader
+from pymongo import MongoClient
+from redis import Redis
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+MONGODB_URI = os.environ.get("MONGODB_URI", "mongodb://admin:admin@mongodb:27017")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://valkey:6379")
 
 client = OpenAI(
     api_key=GEMINI_API_KEY,
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
 )
+
+redis_client = Redis.from_url(REDIS_URL)
+
+# Circuit breaker config
+CIRCUIT_FAILURE_THRESHOLD = 5  # failures before opening
+CIRCUIT_COOLDOWN = 30  # seconds before trying again
+CIRCUIT_WINDOW = 60  # failure count window
+
+
+def circuit_is_open() -> bool:
+    """Check if circuit breaker is open (API considered down)."""
+    state = redis_client.get("circuit:gemini:state")
+    return state == b"open"
+
+
+def record_failure():
+    """Record a failure. If threshold reached, open the circuit."""
+    pipe = redis_client.pipeline()
+    pipe.incr("circuit:gemini:failures")
+    pipe.expire("circuit:gemini:failures", CIRCUIT_WINDOW)
+    pipe.execute()
+
+    failures = int(redis_client.get("circuit:gemini:failures") or 0)
+    if failures >= CIRCUIT_FAILURE_THRESHOLD:
+        redis_client.set("circuit:gemini:state", "open", ex=CIRCUIT_COOLDOWN)
+
+
+def record_success():
+    """Reset failure count on success."""
+    redis_client.delete("circuit:gemini:failures")
+    redis_client.delete("circuit:gemini:state")
+
+
+def get_sync_collection():
+    """Get a synchronous MongoDB collection for use in RQ workers."""
+    if "mongodb+srv" in MONGODB_URI or "mongodb.net" in MONGODB_URI:
+        mongo_client = MongoClient(MONGODB_URI, tlsCAFile=certifi.where(), tls=True)
+    else:
+        mongo_client = MongoClient(MONGODB_URI)
+    return mongo_client["mydb"]["files"]
+
+
+def call_with_retry(func, max_retries=3, base_delay=2):
+    """Call a function with exponential backoff retry and circuit breaker."""
+    # Circuit breaker: if open, fail fast
+    if circuit_is_open():
+        raise Exception("Circuit breaker OPEN — Gemini API is temporarily unavailable. Try again later.")
+
+    for attempt in range(max_retries):
+        try:
+            result = func()
+            record_success()
+            return result
+        except Exception as e:
+            record_failure()
+            if attempt == max_retries - 1:
+                raise e
+            delay = base_delay * (2 ** attempt)  # 2s, 4s, 8s
+            time.sleep(delay)
 
 
 def encode_image(image_path):
@@ -22,9 +86,11 @@ def encode_image(image_path):
         return base64.b64encode(image_file.read()).decode("utf-8")
 
 
-async def process_file(id: str, file_path: str, jd_content: str = ""):
+def process_file(id: str, file_path: str, jd_content: str = ""):
+    files_collection = get_sync_collection()
+
     try:
-        await files_collection.update_one({"_id": ObjectId(id)}, {
+        files_collection.update_one({"_id": ObjectId(id)}, {
             "$set": {"status": "Converting PDF"}
         })
 
@@ -37,7 +103,7 @@ async def process_file(id: str, file_path: str, jd_content: str = ""):
             page.save(image_save_path, 'JPEG')
             images.append(image_save_path)
 
-        await files_collection.update_one({"_id": ObjectId(id)}, {
+        files_collection.update_one({"_id": ObjectId(id)}, {
             "$set": {"status": "Extracting text"}
         })
 
@@ -50,7 +116,7 @@ async def process_file(id: str, file_path: str, jd_content: str = ""):
         except Exception:
             extracted_text = ""
 
-        await files_collection.update_one({"_id": ObjectId(id)}, {
+        files_collection.update_one({"_id": ObjectId(id)}, {
             "$set": {"status": "Analyzing with AI"}
         })
 
@@ -119,7 +185,7 @@ ATS_SCORE: [number 0-100]
 
 Be professional, specific, and constructive. Reference actual content from the resume."""
 
-        result = client.chat.completions.create(
+        result = call_with_retry(lambda: client.chat.completions.create(
             model="gemini-2.5-flash-lite",
             temperature=0,
             messages=[
@@ -138,7 +204,7 @@ Be professional, specific, and constructive. Reference actual content from the r
                     ],
                 }
             ],
-        )
+        ))
         response_text = result.choices[0].message.content
 
         # Parse ATS score from response
@@ -146,7 +212,7 @@ Be professional, specific, and constructive. Reference actual content from the r
         ats_score = int(score_match.group(1)) if score_match else None
         clean_result = re.sub(r'ATS_SCORE:\s*\d+\n*', '', response_text).strip()
 
-        await files_collection.update_one({"_id": ObjectId(id)}, {
+        files_collection.update_one({"_id": ObjectId(id)}, {
             "$set": {
                 "status": "Processed",
                 "result": clean_result,
@@ -155,7 +221,7 @@ Be professional, specific, and constructive. Reference actual content from the r
         })
 
     except Exception as e:
-        await files_collection.update_one({"_id": ObjectId(id)}, {
+        files_collection.update_one({"_id": ObjectId(id)}, {
             "$set": {
                 "status": "Failed",
                 "result": f"Something went wrong: {str(e)}"

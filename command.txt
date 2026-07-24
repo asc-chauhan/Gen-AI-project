@@ -50,3 +50,10 @@ curl http://localhost:8000/{file_id}
 # ============================================
 # Freeze requirements (update requirements.txt)
 sh freeze.sh
+
+
+
+# final
+docker exec -it devcontainer-app-1 bash
+
+cd /workspaces/Gen-AI-project && source env/bin/activate && ./run.sh
