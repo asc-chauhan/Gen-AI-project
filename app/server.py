@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from .utils.file import save_to_disk
 from .db.collections.files import files_collection, FileSchema, setup_ttl_index
+from .db.client import mongo_client
 from .queue.workers import process_file
 from bson import ObjectId
 from datetime import datetime
@@ -96,9 +97,14 @@ def home():
 
 
 @app.get("/health")
-def health():
-    # Lightweight liveness probe for uptime pings (keeps Render free tier awake).
-    return {"status": "ok"}
+async def health():
+    # Liveness probe for uptime pings: keeps Render awake and counts as
+    # activity for the Atlas free cluster so it doesn't get paused.
+    try:
+        await mongo_client.admin.command("ping")
+        return {"status": "ok", "db": "ok"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "degraded", "db": "down"})
 
 
 @app.get("/{id}")
