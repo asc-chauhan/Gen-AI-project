@@ -95,6 +95,12 @@ def home():
     return FileResponse(os.path.join(static_dir, "index.html"))
 
 
+@app.get("/health")
+def health():
+    # Lightweight liveness probe for uptime pings (keeps Render free tier awake).
+    return {"status": "ok"}
+
+
 @app.get("/{id}")
 async def get_file_by_id(id: str = Path(..., description="ID of the file")):
     if len(id) != 24:
